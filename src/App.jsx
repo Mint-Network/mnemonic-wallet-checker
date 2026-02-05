@@ -1,6 +1,10 @@
 import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ethers } from "ethers";
+import { HDKey } from "@scure/bip32";
+import { mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
+import * as bitcoin from "bitcoinjs-lib";
+import bchaddr from "bchaddrjs";
 // import { derivePath } from "ed25519-hd-key";
 // import * as bip39 from "bip39";
 // import { Keypair } from "@solana/web3.js";
@@ -21,6 +25,13 @@ const currencyPaths = {
 };
 // list of currencies which do not support balance display
 const noBalanceCurrencyDisplay = ["BTC", "LTC", "BCH"];
+// litecoin network params for bech32 segwit (P2WPKH)
+const litecoinNetwork = {
+  bech32: "ltc",
+  pubKeyHash: 0x30,
+  scriptHash: 0x32,
+  wif: 0xb0,
+};
 function App() {
   const [selectedType, setSelectedType] = useState("xpub");
   const [currencyType, setCurrencyType] = useState("ETH");
@@ -39,20 +50,28 @@ function App() {
     setCurrentPage(1);
   }, [selectedType, currencyType]);
 
-  const getRootFromMnemonic = (mnemonic) => {
-    try {
-      return ethers.HDNodeWallet.fromPhrase(mnemonic.trim(), undefined, "m");
-    } catch (e) {
-      console.error("Invalid mnemonic:", e);
-      return null;
+const getRootFromMnemonic = (mnemonic, currency) => {
+  try {
+    if (["BTC", "LTC", "BCH"].includes(currency)) {
+      if (!validateMnemonic(mnemonic.trim())) throw new Error("Invalid mnemonic");
+      const seed = mnemonicToSeedSync(mnemonic.trim());
+      return HDKey.fromMasterSeed(seed);
     }
-  };
+    return ethers.HDNodeWallet.fromPhrase(mnemonic.trim(), undefined, "m");
+  } catch (e) {
+    console.error("Invalid mnemonic:", e);
+    return null;
+  }
+};
 
-  const getRootFromXpub = (xpub, currency) => {
+const getRootFromXpub = (xpub, currency) => {
     try {
       // if (currency === "SOL")
       //   throw new Error("SOL xpub derivation not supported, use mnemonic.");
-      return ethers.HDNodeWallet.fromExtendedKey(xpub.trim());
+    if (["BTC", "LTC", "BCH"].includes(currency)) {
+      return HDKey.fromExtendedKey(xpub.trim());
+    }
+    return ethers.HDNodeWallet.fromExtendedKey(xpub.trim());
     } catch (e) {
       console.error("Invalid xpub:", e);
       return null;
@@ -71,29 +90,54 @@ function App() {
   //   return Keypair.fromSeed(key);
   // };
 
-  const getChildFromMnemonic = (root, index, currency, mnemonic) => {
-    try {
-      const basePath = currencyPaths[currency];
-      if (!basePath) throw new Error("Unsupported currency");
-      const path = `${basePath}${index}`;
+const getChildFromMnemonic = (root, index, currency, mnemonic) => {
+  try {
+    const basePath = currencyPaths[currency];
+    if (!basePath) throw new Error("Unsupported currency");
+    const path = `${basePath}${index}`;
+    if (!["BTC", "LTC", "BCH"].includes(currency)) {
       const child = root.derivePath(path);
       return { address: child.address, path };
-    } catch (e) {
-      console.error("Error deriving child:", e);
-      return null;
     }
-  };
+    const child = root.derive(path);
+    if (!child || !child.publicKey) throw new Error("Failed to derive key");
+    if (currency === "BCH") {
+      const legacy = bitcoin.payments.p2pkh({ pubkey: child.publicKey }).address;
+      const address = bchaddr.toCashAddress(legacy);
+      return { address, path };
+    }
+    const network = currency === "LTC" ? litecoinNetwork : bitcoin.networks.bitcoin;
+    const { address } = bitcoin.payments.p2wpkh({ pubkey: child.publicKey, network });
+    return { address, path };
+  } catch (e) {
+    console.error("Error deriving child:", e);
+    return null;
+  }
+};
 
-  const getChildFromXpub = (root, index, currency) => {
-    try {
-      // if (currency === "SOL") throw new Error("SOL does not support xpub");
+const getChildFromXpub = (root, index, currency) => {
+  try {
+    // if (currency === "SOL") throw new Error("SOL does not support xpub");
+    if (!["BTC", "LTC", "BCH"].includes(currency)) {
       const child = root.deriveChild(index);
       return { address: child.address, path: `xpub/${index}` };
-    } catch (e) {
-      console.error("Error deriving child:", e);
-      return null;
     }
-  };
+    const child =
+      typeof root.deriveChild === "function" ? root.deriveChild(index) : root.derive(String(index));
+    if (!child || !child.publicKey) throw new Error("Failed to derive child from xpub");
+    if (currency === "BCH") {
+      const legacy = bitcoin.payments.p2pkh({ pubkey: child.publicKey }).address;
+      const address = bchaddr.toCashAddress(legacy);
+      return { address, path: `xpub/${index}` };
+    }
+    const network = currency === "LTC" ? litecoinNetwork : bitcoin.networks.bitcoin;
+    const { address } = bitcoin.payments.p2wpkh({ pubkey: child.publicKey, network });
+    return { address, path: `xpub/${index}` };
+  } catch (e) {
+    console.error("Error deriving child:", e);
+    return null;
+  }
+};
 
   const deriveAddresses = async (page = 1) => {
     try {
@@ -108,7 +152,7 @@ function App() {
       const root =
         selectedType === "xpub"
           ? getRootFromXpub(inputValue, currencyType)
-          : getRootFromMnemonic(inputValue);
+          : getRootFromMnemonic(inputValue, currencyType);
 
       if (!root && selectedType !== "mnemonic") {
         alert("Invalid input");

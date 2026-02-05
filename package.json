@@ -6,8 +6,12 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build"
-    },
+  },
   "dependencies": {
+    "@scure/bip32": "^2.0.1",
+    "@scure/bip39": "^2.0.1",
+    "bchaddrjs": "^0.5.2",
+    "bitcoinjs-lib": "^7.0.1",
     "ethers": "^6.11.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
